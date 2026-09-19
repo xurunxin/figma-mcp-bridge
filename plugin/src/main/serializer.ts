@@ -198,7 +198,7 @@ const serializeLetterSpacing = (letterSpacing: LetterSpacing | symbol) => {
   return { value: letterSpacing.value, unit: letterSpacing.unit };
 };
 
-const getBounds = (node: SceneNode): SerializedBounds | undefined => {
+const getBounds = (node: SceneNode | PageNode): SerializedBounds | undefined => {
   if ("x" in node && "y" in node && "width" in node && "height" in node) {
     return {
       x: node.x,
@@ -239,7 +239,7 @@ const serializeText = (node: TextNode, base: SerializedNode) => {
   };
 };
 
-const serializeStyles = (node: SceneNode): SerializedStyles => {
+const serializeStyles = (node: SceneNode | PageNode): SerializedStyles => {
   const styles: SerializedStyles = {};
 
   if ("opacity" in node) {
@@ -346,7 +346,7 @@ const serializeStyles = (node: SceneNode): SerializedStyles => {
   return styles;
 };
 
-export const serializeNode = (node: SceneNode): SerializedNode => {
+export const serializeNode = (node: SceneNode | PageNode): SerializedNode => {
   const base: SerializedNode = {
     id: node.id,
     name: node.name,

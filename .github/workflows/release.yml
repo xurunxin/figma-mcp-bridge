@@ -47,6 +47,16 @@ jobs:
         working-directory: server
         run: bun run build
 
+      - name: Build plugin before npm packaging
+        run: |
+          bun install --cwd plugin --frozen-lockfile
+          bun run --cwd plugin build
+          bun run --cwd server prepare:package
+
+      - name: Test CLI and MCP contracts
+        working-directory: server
+        run: bun run test
+
       - name: Verify CLI entry point
         working-directory: server
         run: |
@@ -68,16 +78,6 @@ jobs:
         # env:
         #   NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # ── Figma plugin: install, build ─────────────────────────────────
-
-      - name: Install plugin dependencies
-        working-directory: plugin
-        run: bun install --frozen-lockfile
-
-      - name: Build Figma plugin
-        working-directory: plugin
-        run: bun run build
-
       # ── Package GitHub release ───────────────────────────────────────
 
       - name: Package release
@@ -91,6 +91,7 @@ jobs:
           # Copy other repo files
           cp README.md release/
           cp LICENSE.md release/
+          cp -r research release/research
 
           # Create zip
           cd release

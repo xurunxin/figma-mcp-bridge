@@ -1,4 +1,5 @@
 import { WebSocketServer, WebSocket } from "ws";
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { BridgeRequest, BridgeResponse, ConnectedFile } from "./types.js";
@@ -21,11 +22,10 @@ export class Bridge {
   private wss: WebSocketServer;
   private connections = new Map<string, ConnectionEntry>();
   private pending = new Map<string, PendingRequest>();
-  private counter = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
-    this.wss = new WebSocketServer({ noServer: true });
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
     this.wss.on("error", (err) => {
       console.error("WebSocketServer error:", err);
     });
@@ -86,9 +86,18 @@ export class Bridge {
 
     ws.on("message", (data) => {
       try {
-        const resp: BridgeResponse = JSON.parse(data.toString());
+        const message = JSON.parse(data.toString());
+        if (message?.type === "bridge-hello" || message?.type === "bridge-ping") {
+          ws.send(
+            JSON.stringify({
+              type: message.type === "bridge-hello" ? "bridge-ready" : "bridge-pong",
+            })
+          );
+          return;
+        }
+        const resp: BridgeResponse = message;
         const pending = this.pending.get(resp.requestId);
-        if (pending) {
+        if (pending && pending.ws === ws) {
           clearTimeout(pending.timeout);
           this.pending.delete(resp.requestId);
           pending.resolve(resp);
@@ -223,12 +232,7 @@ export class Bridge {
   }
 
   private nextId(): string {
-    this.counter++;
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, "0");
-    const mm = String(now.getMinutes()).padStart(2, "0");
-    const ss = String(now.getSeconds()).padStart(2, "0");
-    return `req-${hh}${mm}${ss}-${this.counter}`;
+    return `req-${randomUUID()}`;
   }
 
   close(): void {
@@ -240,12 +244,12 @@ export class Bridge {
     // Reject all pending requests
     for (const [id, { reject, timeout }] of this.pending) {
       clearTimeout(timeout);
-      reject(new Error("Bridge closed"));
+      reject(new Error("Bridge connection closed"));
     }
     this.pending.clear();
 
     for (const [, entry] of this.connections) {
-      entry.ws.close();
+      entry.ws.terminate();
     }
     this.connections.clear();
     this.wss.close();

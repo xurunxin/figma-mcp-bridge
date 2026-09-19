@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Figma Bridge Capability Research",
+  "version": "0.1.0",
+  "description": "Opt-in Figma browser capability probes. Not a replacement for the Figma plugin.",
+  "minimum_chrome_version": "116",
+  "permissions": ["scripting", "storage", "activeTab", "debugger"],
+  "host_permissions": ["https://www.figma.com/*", "https://figma.com/*"],
+  "background": { "service_worker": "worker.js", "type": "module" },
+  "action": { "default_popup": "popup.html" }
+}

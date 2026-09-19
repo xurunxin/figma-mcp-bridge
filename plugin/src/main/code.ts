@@ -82,9 +82,8 @@ const generateFallbackFileKey = (): string => {
 };
 
 const getFileKey = (): string => {
-  // figma.fileKey is available for saved files; otherwise we generate a
-  // session-scoped fallback so unsaved files (and files with duplicate names)
-  // still get a stable, unique identifier for this plugin instance.
+  // Real fileKey availability depends on plugin privileges, not just whether
+  // the file is saved. Use a session-scoped connection ID when unavailable.
   try {
     if (typeof figma.fileKey === "string" && figma.fileKey) {
       return figma.fileKey;
@@ -456,7 +455,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
       case "get_design_context": {
         const depth = typeof request.params?.depth === "number" ? request.params.depth : 2;
         const serializeWithDepth = async (
-          node: unknown,
+          node: SceneNode | PageNode,
           currentDepth: number
         ): Promise<ReturnType<typeof serializeNode>> => {
           const serialized = serializeNode(node);
@@ -494,7 +493,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         const contextNodes =
           selection.length > 0
             ? await Promise.all(selection.map((node) => serializeWithDepth(node, 0)))
-            : [await serializeWithDepth(figma.currentPage as unknown as SceneNode, 0)];
+            : [await serializeWithDepth(figma.currentPage, 0)];
 
         return {
           type: request.type,
@@ -805,9 +804,6 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         }
 
         if (typeof params.x === "number" || typeof params.y === "number") {
-          if (!("x" in node) || !("y" in node)) {
-            throw new Error(`Node does not support x/y positioning: ${node.id}`);
-          }
           positionNode(node, params.x, params.y);
           applied.x = node.x;
           applied.y = node.y;
@@ -836,10 +832,14 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         }
 
         if (typeof params.cornerRadius === "number") {
-          if (!("cornerRadius" in node)) {
+          if (
+            !("cornerRadius" in node) ||
+            node.type === "SHAPE_WITH_TEXT" ||
+            node.type === "CONNECTOR"
+          ) {
             throw new Error(`Node does not support cornerRadius: ${node.id}`);
           }
-          node.cornerRadius = params.cornerRadius;
+          (node as SceneNode & CornerMixin).cornerRadius = params.cornerRadius;
           applied.cornerRadius = node.cornerRadius;
         }
 
@@ -1339,9 +1339,6 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         }
 
         if (typeof params.strokeHex === "string") {
-          if (!("strokes" in node)) {
-            throw new Error(`Node does not support strokes: ${node.id}`);
-          }
           const strokeOpacity =
             typeof params.strokeOpacity === "number" ? params.strokeOpacity : undefined;
           setSolidFill(node, params.strokeHex, strokeOpacity, "stroke");

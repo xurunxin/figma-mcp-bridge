@@ -542,7 +542,7 @@ export const createImageInput = z.object({
     .string()
     .min(1)
     .describe(
-      "Image source. Accepts a local file path (absolute or relative to the MCP server cwd), an http/https URL, or a data URI."
+      "Image source. Accepts a local file path inside the caller workspace (CLI --workspace or MCP cwd), an http/https URL, or a data URI."
     ),
   name: z.string().optional().describe("Optional image node name"),
   parentId: createFigmaNodeIdSchema()
@@ -574,7 +574,7 @@ export const importHtmlLayersInput = z.object({
     .string()
     .min(1)
     .describe(
-      "Path to a JSON file containing an html-figma htmlToFigma() layer tree, relative to the MCP server cwd (absolute paths must stay inside it)."
+      "Path to an html-figma htmlToFigma() layer tree JSON, relative to the caller workspace (CLI --workspace or MCP cwd); absolute paths must stay inside it."
     ),
   name: z
     .string()
@@ -760,9 +760,7 @@ export const toolInputSchemas = {
           outputPath: z
             .string()
             .min(1)
-            .describe(
-              "Output file path (relative paths resolve from the MCP server current working directory)"
-            ),
+            .describe("Output file path inside the caller workspace (CLI --workspace or MCP cwd)"),
           format: createExportFormatSchema()
             .optional()
             .describe("Per-item export format override: PNG, SVG, JPG, or PDF"),
@@ -991,7 +989,7 @@ export function validateRpc(
   nodeIds?: string[],
   params?: Record<string, unknown>
 ): RpcValidation {
-  if (!(tool in rpcInputSchemas)) return { error: null };
+  if (!Object.hasOwn(rpcInputSchemas, tool)) return { error: `Unknown tool: ${tool}` };
 
   const name = tool as ToolName;
   const result = rpcInputSchemas[name].safeParse(rpcToArgs[name](nodeIds, params));

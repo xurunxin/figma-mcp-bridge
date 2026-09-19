@@ -42,17 +42,17 @@ export class Node {
     fileKey?: string
   ): Promise<BridgeResponse> {
     if (this._role === Role.Leader && this.leader) {
-      return this.leader.getBridge().sendWithParams(requestType, nodeIds, params, fileKey);
+      return this.leader.sendWithParams(requestType, nodeIds, params, fileKey);
     }
     return this.follower.sendWithParams(requestType, nodeIds, params, fileKey);
   }
 
-  listConnectedFiles(): ConnectedFile[] | undefined {
+  async listConnectedFiles(): Promise<ConnectedFile[]> {
     if (this._role === Role.Leader && this.leader) {
       return this.leader.getBridge().listConnectedFiles();
     }
-    // Followers return undefined — the tool handler falls back to RPC
-    return undefined;
+    // Both frontends use the same backend contract, including follower discovery.
+    return this.follower.listConnectedFiles();
   }
 
   async becomeLeader(): Promise<void> {

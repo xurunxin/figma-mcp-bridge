@@ -6,6 +6,8 @@
     "prettier": "3.9.6"
   },
   "scripts": {
+    "build:package": "bun run --cwd plugin build && bun run --cwd server build && bun run --cwd server prepare:package",
+    "test": "bun run --cwd plugin build && bun run --cwd server build && bun run --cwd server test",
     "prepare": "husky",
     "format": "prettier --write --ignore-unknown .",
     "format:check": "prettier --check --ignore-unknown ."

@@ -1,49 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createBridgeClient } from "./bridge-client";
 import hoppLogo from "./assets/hopp-logo.png";
-
-type RequestType =
-  | "get_document"
-  | "get_selection"
-  | "get_node"
-  | "get_styles"
-  | "get_metadata"
-  | "get_design_context"
-  | "get_variable_defs"
-  | "get_screenshot"
-  | "set_node_visibility"
-  | "set_text_content"
-  | "set_text_properties"
-  | "set_node_properties"
-  | "set_solid_fill"
-  | "set_gradient_fill"
-  | "set_effects"
-  | "set_stroke_properties"
-  | "set_auto_layout"
-  | "create_frame"
-  | "create_text"
-  | "create_shape"
-  | "create_image"
-  | "duplicate_nodes"
-  | "reparent_nodes"
-  | "group_nodes"
-  | "ungroup_node"
-  | "set_selection"
-  | "scroll_and_zoom_into_view"
-  | "delete_nodes";
-
-type ServerRequest = {
-  type: RequestType;
-  requestId: string;
-  nodeIds?: string[];
-  params?: Record<string, unknown>;
-};
-
-type PluginResponse = {
-  type: RequestType;
-  requestId: string;
-  data?: unknown;
-  error?: string;
-};
 
 type PluginStatus = {
   fileName: string;
@@ -64,8 +21,7 @@ export default function App() {
     fileKey: "",
     selectionCount: 0,
   });
-  const socketRef = useRef<WebSocket | null>(null);
-  const reconnectTimer = useRef<number | null>(null);
+  const clientRef = useRef<ReturnType<typeof createBridgeClient> | null>(null);
 
   const statusLabel = useMemo(
     () => (connected ? "WebSocket Connected" : "Disconnected"),
@@ -100,16 +56,14 @@ export default function App() {
         return;
       }
 
-      if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
-        return;
-      }
-      socketRef.current.send(JSON.stringify(msg));
+      clientRef.current?.respond(msg);
     };
 
     window.addEventListener("message", handleMessage);
     // The main thread reads the persisted state asynchronously, so ask for it
     // on mount rather than relying on a broadcast we may have missed.
     parent.postMessage({ pluginMessage: { type: "request-ui-state" } }, "*");
+    parent.postMessage({ pluginMessage: { type: "ui-ready" } }, "*");
     return () => {
       window.removeEventListener("message", handleMessage);
     };
@@ -127,69 +81,23 @@ export default function App() {
   useEffect(() => {
     if (!status.fileKey) return;
 
-    let disposed = false;
-
-    const connect = () => {
-      if (disposed) return;
-
-      if (socketRef.current) {
-        const previousSocket = socketRef.current;
-        previousSocket.onopen = null;
-        previousSocket.onclose = null;
-        previousSocket.onerror = null;
-        previousSocket.onmessage = null;
-        previousSocket.close();
-      }
-
-      const wsUrl = `${WS_BASE_URL}?fileKey=${encodeURIComponent(status.fileKey)}&fileName=${encodeURIComponent(status.fileName)}`;
-      const ws = new WebSocket(wsUrl);
-      socketRef.current = ws;
-
-      ws.onopen = () => {
-        setConnected(true);
-        parent.postMessage({ pluginMessage: { type: "ui-ready" } }, "*");
-      };
-
-      ws.onclose = () => {
-        if (disposed || socketRef.current !== ws) return;
-        setConnected(false);
-        if (reconnectTimer.current === null) {
-          reconnectTimer.current = window.setTimeout(() => {
-            reconnectTimer.current = null;
-            connect();
-          }, 1500);
-        }
-      };
-
-      ws.onerror = () => {
-        if (disposed || socketRef.current !== ws) return;
-        setConnected(false);
-      };
-
-      ws.onmessage = (event) => {
-        if (disposed || socketRef.current !== ws) return;
-        const payload = JSON.parse(event.data) as ServerRequest;
-        parent.postMessage({ pluginMessage: { type: "server-request", payload } }, "*");
-      };
-    };
-
-    connect();
-
+    const client = createBridgeClient({
+      url: `${WS_BASE_URL}?fileKey=${encodeURIComponent(status.fileKey)}&fileName=${encodeURIComponent(status.fileName)}`,
+      onStatus: setConnected,
+      onRequest: (payload) =>
+        parent.postMessage({ pluginMessage: { type: "server-request", payload } }, "*"),
+    });
+    clientRef.current = client;
+    const wake = () => client.wake();
+    window.addEventListener("online", wake);
+    window.addEventListener("pageshow", wake);
+    document.addEventListener("visibilitychange", wake);
     return () => {
-      disposed = true;
-      if (reconnectTimer.current !== null) {
-        window.clearTimeout(reconnectTimer.current);
-        reconnectTimer.current = null;
-      }
-      if (socketRef.current) {
-        const ws = socketRef.current;
-        ws.onopen = null;
-        ws.onclose = null;
-        ws.onerror = null;
-        ws.onmessage = null;
-        ws.close();
-        socketRef.current = null;
-      }
+      window.removeEventListener("online", wake);
+      window.removeEventListener("pageshow", wake);
+      document.removeEventListener("visibilitychange", wake);
+      client.dispose();
+      clientRef.current = null;
     };
   }, [status.fileKey, status.fileName]);
 

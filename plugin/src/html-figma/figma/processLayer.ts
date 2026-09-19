@@ -4,7 +4,7 @@ import { getMatchingFont } from "./getFont";
 import { assign } from "./helpers";
 import { LayerNode, PlainLayerNode, WithRef } from "../types";
 
-const processDefaultElement = (layer: LayerNode, node: SceneNode): SceneNode => {
+const processDefaultElement = (layer: LayerNode, node: SceneNode & LayoutMixin): SceneNode => {
   node.x = layer.x as number;
   node.y = layer.y as number;
   node.resize(layer.width || 1, layer.height || 1);

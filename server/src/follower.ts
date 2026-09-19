@@ -1,81 +1,33 @@
-import type { BridgeResponse, ConnectedFile, RPCRequest, RPCResponse } from "./types.js";
+import type { BridgeResponse, ConnectedFile, RPCResponse } from "./types.js";
+import { health, request } from "./runtime.js";
 
-/**
- * Follower proxies MCP tool calls to the leader via HTTP /rpc.
- */
 export class Follower {
-  constructor(private leaderUrl: string) {}
-
-  send(requestType: string, nodeIds?: string[], fileKey?: string): Promise<BridgeResponse> {
-    return this.sendWithParams(requestType, nodeIds, undefined, fileKey);
+  private port: number;
+  constructor(leaderUrl: string) {
+    this.port = Number(new URL(leaderUrl).port);
   }
-
+  send(type: string, nodeIds?: string[], fileKey?: string): Promise<BridgeResponse> {
+    return this.sendWithParams(type, nodeIds, undefined, fileKey);
+  }
   async sendWithParams(
-    requestType: string,
+    type: string,
     nodeIds?: string[],
     params?: Record<string, unknown>,
     fileKey?: string
   ): Promise<BridgeResponse> {
-    const rpcReq: RPCRequest = { tool: requestType };
-    if (nodeIds && nodeIds.length > 0) rpcReq.nodeIds = nodeIds;
-    if (params && Object.keys(params).length > 0) rpcReq.params = params;
-    if (fileKey) rpcReq.fileKey = fileKey;
-
-    const response = await fetch(`${this.leaderUrl}/rpc`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(rpcReq),
-      signal: AbortSignal.timeout(210_000),
+    const result = await request<RPCResponse>(this.port, "/rpc", {
+      tool: type,
+      nodeIds,
+      params,
+      fileKey,
     });
-
-    if (!response.ok) {
-      // The leader answers validation failures with a 400 whose body names the
-      // offending field — surface it instead of a bare status code (#35).
-      const body = (await response.json().catch(() => null)) as RPCResponse | null;
-      throw new Error(body?.error ?? `Leader returned status ${response.status}`);
-    }
-
-    const rpcResp = (await response.json()) as RPCResponse;
-
-    if (rpcResp.error) {
-      throw new Error(rpcResp.error);
-    }
-
-    return {
-      type: requestType,
-      requestId: "",
-      data: rpcResp.data,
-    };
+    return { type, requestId: "", data: result.data };
   }
-
   async listConnectedFiles(): Promise<ConnectedFile[]> {
-    const response = await fetch(`${this.leaderUrl}/rpc`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tool: "list_files" } as RPCRequest),
-      signal: AbortSignal.timeout(5_000),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Leader returned status ${response.status}`);
-    }
-
-    const rpcResp = (await response.json()) as RPCResponse;
-    if (rpcResp.error) {
-      throw new Error(rpcResp.error);
-    }
-
-    return (rpcResp.data as ConnectedFile[]) ?? [];
+    const result = await request<RPCResponse>(this.port, "/rpc", { tool: "list_files" }, 5000);
+    return result.data as ConnectedFile[];
   }
-
   async ping(): Promise<boolean> {
-    try {
-      const response = await fetch(`${this.leaderUrl}/ping`, {
-        signal: AbortSignal.timeout(2_000),
-      });
-      return response.ok;
-    } catch {
-      return false;
-    }
+    return (await health(this.port)) !== null;
   }
 }

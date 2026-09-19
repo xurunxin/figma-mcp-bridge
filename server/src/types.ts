@@ -10,6 +10,7 @@ export interface BridgeResponse {
   requestId: string;
   data?: unknown;
   error?: string;
+  errorCode?: string;
 }
 
 export interface RPCRequest {
@@ -22,6 +23,8 @@ export interface RPCRequest {
 export interface RPCResponse {
   data?: unknown;
   error?: string;
+  errorCode?: string;
+  exitCode?: number;
 }
 
 export interface ConnectedFile {

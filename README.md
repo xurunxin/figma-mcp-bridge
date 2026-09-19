@@ -1,5 +1,40 @@
 # Figma MCP Bridge
 
+通过 Figma 插件访问已打开的画布，支持 **CLI + Skills 按需调用**，也保留原有 MCP 入口。CLI 与 MCP 共用全部 39 个工具的校验和执行逻辑。Windows 桌面应用启停为首版支持范围。
+
+## CLI 快速开始（无需配置 MCP）
+
+本次新增 CLI 的代码尚未发布到 npm。先从本地构建包安装；最终用户安装这个包只需要 Node.js 20+，应用管理还需要 Windows 和 PowerShell 7，不需要 Bun 或源码。
+
+```powershell
+# 开发者构建本地交付包：先在根目录、server、plugin 各执行 bun install --frozen-lockfile
+bun run build:package
+cd server
+npm pack
+npm install -g ./gethopp-figma-mcp-bridge-0.2.0.tgz
+
+# 用户/Agent 使用
+figma-bridge doctor
+figma-bridge skills install --target "X:/MyProject"
+figma-bridge app open --target desktop
+```
+
+`doctor` 返回 `pluginManifest`。在 Figma 桌面版的测试文件中手动导入该路径的 `manifest.json`，然后运行插件。不要移动或删除插件目录。`app open` 打开成功只报告 `opened`，此时画布不一定可操作。
+
+```powershell
+figma-bridge files list
+figma-bridge wait --file-key "files list 返回的连接标识" --timeout 60
+figma-bridge tools describe create_frame
+'{"name":"CLI 示例","width":400,"height":240}' | figma-bridge call create_frame --input - --file-key "连接标识"
+figma-bridge tools describe get_node
+'{"nodeId":"上一步返回的节点 ID"}' | figma-bridge call get_node --input - --file-key "连接标识"
+figma-bridge bridge stop
+```
+
+`fileKey` 是插件连接标识，可能是临时值；不能从 URL 推导，多文件连接时必须显式选择。首次业务调用会自动启动桥接，10 分钟无业务调用且无执行中请求时退出。心跳和状态查询不延长空闲时间。
+
+默认结果为 JSON，日志在 stderr。完整命令、错误码、应用所有权、路径规则和本地验收见 [CLI 使用说明](docs/cli.md)。[Chrome 扩展研究](research/README.md) 是独立且默认关闭的原型，尚未证明可以替代 Figma 插件。
+
 [![Pairing with Hopp](https://gethopp.app/git/hopp-shield.svg?ref=hopp-repo)](https://gethopp.app)
 
 - [Demo](#demo)
@@ -15,11 +50,7 @@
 
 <br/>
 
-While other amazing Figma MCP servers like [Figma-Context-MCP](https://github.com/GLips/Figma-Context-MCP/) exist, one issues is the [API limiting](https://github.com/GLips/Figma-Context-MCP/issues/258) for free users.
-
-The limit for free accounts is 6 requests per month, yes **per month**.
-
-Figma MCP Bridge is a solution to this problem. It is a plugin + MCP server that streams live Figma document data to AI tools without hitting Figma API rate limits, so its Figma MCP for the rest of us ✊
+Figma MCP Bridge reads and edits open documents through the Figma Plugin API. It does not call the official Figma MCP service. Drafts are a convenient testing location, not a prerequisite; file permissions and editor capabilities still apply.
 
 It supports **multiple Figma files connected simultaneously**; open the plugin in each file and your AI agent can query any of them by `fileKey`. Single-file setups work exactly as before with no changes required.
 

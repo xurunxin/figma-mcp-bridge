@@ -1,10 +1,11 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { lookup } from "node:dns/promises";
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import path from "node:path";
-import type { z } from "zod";
-import type { Node } from "./node.js";
+import { z } from "zod";
+import type { ConnectedFile } from "./types.js";
+import { BridgeError, asBridgeError } from "./errors.js";
 import {
   createFrameInput,
   createImageInput,
@@ -32,7 +33,6 @@ import {
   toolInputSchemas,
 } from "./schema.js";
 import type { BridgeResponse } from "./types.js";
-import { Follower } from "./follower.js";
 
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
 const IMAGE_FETCH_TIMEOUT_MS = 15_000;
@@ -41,6 +41,7 @@ const MAX_IMAGE_REDIRECTS = 5;
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
+  error?: BridgeError;
 };
 
 export type ExportFormat = "PNG" | "SVG" | "JPG" | "PDF";
@@ -89,36 +90,64 @@ interface SaveScreenshotItemResult {
  * @param node - The node coordinator for leader/follower routing.
  * @param port - The port used for follower-to-leader HTTP calls.
  */
-export function registerTools(server: McpServer, node: Node, port: number): void {
-  server.tool(
+export interface ToolBackend extends ScreenshotSender {
+  send(type: string, nodeIds?: string[], fileKey?: string): Promise<BridgeResponse>;
+  sendWithParams(
+    type: string,
+    nodeIds?: string[],
+    params?: Record<string, unknown>,
+    fileKey?: string
+  ): Promise<BridgeResponse>;
+  listConnectedFiles(): ConnectedFile[] | Promise<ConnectedFile[]>;
+}
+
+export interface ToolDescriptor {
+  name: string;
+  description: string;
+  mutates: boolean;
+  localFiles: boolean;
+  schema: z.AnyZodObject;
+  execute(args: Record<string, unknown>): Promise<ToolResult>;
+}
+
+export function createToolRegistry(
+  node: ToolBackend,
+  workspaceRoot = process.cwd()
+): Map<string, ToolDescriptor> {
+  const registry = new Map<string, ToolDescriptor>();
+  const addTool = <S extends z.ZodRawShape>(
+    name: string,
+    description: string,
+    shape: S,
+    handler: (args: z.infer<z.ZodObject<S>>) => Promise<ToolResult>
+  ): void => {
+    const schema = z.object(shape);
+    registry.set(name, {
+      name,
+      description,
+      schema,
+      mutates: !name.startsWith("get_") && !["list_files", "save_screenshots"].includes(name),
+      localFiles: ["create_image", "import_html_layers", "save_screenshots"].includes(name),
+      execute: (args) => handler(schema.parse(args)),
+    });
+  };
+  addTool(
     "list_files",
     "List all currently connected Figma files. Returns fileKey and fileName for each. Use the fileKey to target a specific file in other tools.",
+    {},
     async (): Promise<ToolResult> => {
       try {
-        let files = node.listConnectedFiles();
-        if (files === undefined) {
-          // Follower: fetch via RPC from leader
-          const follower = new Follower(`http://localhost:${port}`);
-          files = await follower.listConnectedFiles();
-        }
+        const files = await node.listConnectedFiles();
         return {
           content: [{ type: "text", text: JSON.stringify(files) }],
         };
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: err instanceof Error ? err.message : String(err),
-            },
-          ],
-          isError: true,
-        };
+        return toolError(err);
       }
     }
   );
 
-  server.tool(
+  addTool(
     "get_document",
     "Get the current Figma page document tree. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_document.shape,
@@ -127,7 +156,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "get_selection",
     "Get the currently selected nodes in Figma. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_selection.shape,
@@ -136,7 +165,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "get_node",
     "Get a specific Figma node by ID. Accepts top-level IDs like '4029:12345' and instance-child IDs like 'I12740:17806;12740:17793'. Never use hyphens. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_node.shape,
@@ -145,7 +174,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "get_styles",
     "Get all local styles in the document. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_styles.shape,
@@ -154,7 +183,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "get_metadata",
     "Get metadata about the current Figma document including file name, pages, and current page info. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_metadata.shape,
@@ -163,7 +192,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "get_design_context",
     "Get the design context for the current selection or page. Returns a summarized tree structure optimized for understanding the current design context. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_design_context.shape,
@@ -178,7 +207,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "get_variable_defs",
     "Get all local variable definitions including variable collections, modes, and variable values. Variables are Figma's system for design tokens (colors, numbers, strings, booleans). When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_variable_defs.shape,
@@ -187,7 +216,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "get_screenshot",
     "Export a screenshot of the selected nodes or specific nodes by ID. Returns base64-encoded image data. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_screenshot.shape,
@@ -200,7 +229,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "set_node_visibility",
     "Show or hide specific Figma nodes. Returns previous visibility for each node so you can restore them after. Useful for isolating a single layer before exporting: hide all siblings, export the frame, then restore visibility.",
     toolInputSchemas.set_node_visibility.shape,
@@ -211,7 +240,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "set_text_content",
     "Update the contents of a single text node. The plugin loads the node's fonts before applying the new text. Accepts either text or characters. When multiple files are connected, specify fileKey.",
     setTextContentShape.shape,
@@ -225,7 +254,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "set_text_properties",
     "Patch common text properties such as font family/style, size, alignment, auto-resize, line height, letter spacing, fill color, and bounds. When multiple files are connected, specify fileKey.",
     setTextPropertiesShape.shape,
@@ -239,7 +268,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "set_node_properties",
     "Patch common node properties such as name, position, size, visibility, opacity, and corner radius. Only supported properties for the target node type may be changed. Use set_solid_fill or set_gradient_fill to change paints. When multiple files are connected, specify fileKey.",
     setNodePropertiesInput.shape,
@@ -253,7 +282,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "set_solid_fill",
     "Replace a node's fill (or stroke) with a single solid paint. Provide a hex color and optional paint opacity — fillHex/fillOpacity are accepted as aliases. Use set_gradient_fill for gradient paints.",
     setSolidFillShape.shape,
@@ -265,7 +294,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "set_gradient_fill",
     "Replace a node's fill (or stroke) with a gradient paint. Provide ordered stops (position 0..1, hex color, optional alpha) and an optional 2x3 gradientTransform matching Figma's gradientTransform format. Useful for setting linear/radial/angular/diamond gradients programmatically.",
     setGradientFillInput.shape,
@@ -276,7 +305,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "set_effects",
     "Replace a node's effects list (drop/inner shadows, layer/background blurs). Pass an empty array to clear all effects. Each entry mirrors the shape returned by get_node's `effects` field.",
     setEffectsShape.shape,
@@ -288,7 +317,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "set_stroke_properties",
     "Patch stroke geometry properties: weight, align, dash pattern, cap, join. Use set_solid_fill/set_gradient_fill with target='stroke' to set the paint itself.",
     setStrokePropertiesInput.shape,
@@ -302,7 +331,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "set_auto_layout",
     "Configure auto-layout on a frame: direction, gap, padding, alignment, sizing modes, wrap. Set layoutMode='NONE' to disable auto-layout on the frame.",
     setAutoLayoutInput.shape,
@@ -316,7 +345,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "create_page",
     "Create a new page in the Figma document, optionally naming it and switching the editor to it. Returns the new page's ID, which can be passed as parentId to create_frame / create_text / create_shape / create_image to author content on that page. When multiple files are connected, specify fileKey.",
     createPageInput.shape,
@@ -328,7 +357,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "create_frame",
     "Create a new frame, optionally inside a specified parent. You can set name, size, position, and a solid fill. When multiple files are connected, specify fileKey.",
     createFrameInput.shape,
@@ -340,7 +369,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "create_text",
     "Create a new text node, optionally inside a specified parent. You can set its content, font, size, alignment, color, position, and bounds. When multiple files are connected, specify fileKey.",
     createTextShape.shape,
@@ -352,7 +381,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "create_shape",
     "Create a rectangle, ellipse, or line, optionally inside a specified parent. You can set its size, position, rotation, fill, and stroke. When multiple files are connected, specify fileKey.",
     createShapeShape.shape,
@@ -364,55 +393,39 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "create_image",
     "Create an image-backed rectangle from a local file path, remote URL, or data URI. You can set its parent, position, size, corner radius, and fit mode. When multiple files are connected, specify fileKey.",
     createImageInput.shape,
     async ({ source, fileKey, ...params }): Promise<ToolResult> => {
       try {
-        const imageBase64 = await loadImageSourceAsBase64(source, process.cwd());
+        const imageBase64 = await loadImageSourceAsBase64(source, workspaceRoot);
         return await renderResponse(() =>
           node.sendWithParams("create_image", undefined, { ...params, imageBase64 }, fileKey)
         );
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: err instanceof Error ? err.message : String(err),
-            },
-          ],
-          isError: true,
-        };
+        return toolError(err);
       }
     }
   );
 
-  server.tool(
+  addTool(
     "import_html_layers",
-    "Import a DOM serialization (JSON produced by html-figma's browser htmlToFigma()) as editable Figma layers inside a new wrapper frame — frames, text, rectangles, and SVG vectors in one call. Source must be a JSON file path inside the MCP server working directory. Optionally append the wrapper into an existing frame/section via parentId. Requires the plugin to be open in the design editor. When multiple files are connected, specify fileKey.",
+    "Import a DOM serialization (JSON produced by html-figma's browser htmlToFigma()) as editable Figma layers inside a new wrapper frame — frames, text, rectangles, and SVG vectors in one call. Source must be a JSON file inside the caller workspace (CLI --workspace or MCP cwd). Optionally append the wrapper into an existing frame/section via parentId. Requires the plugin to be open in the design editor. When multiple files are connected, specify fileKey.",
     importHtmlLayersInput.shape,
     async ({ source, fileKey, ...params }): Promise<ToolResult> => {
       try {
-        const layers = await loadLayersJson(source, process.cwd());
+        const layers = await loadLayersJson(source, workspaceRoot);
         return await renderResponse(() =>
           node.sendWithParams("import_html_layers", undefined, { ...params, layers }, fileKey)
         );
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: err instanceof Error ? err.message : String(err),
-            },
-          ],
-          isError: true,
-        };
+        return toolError(err);
       }
     }
   );
 
-  server.tool(
+  addTool(
     "duplicate_nodes",
     "Duplicate one or more nodes in place. The duplicates remain under the same parent as the originals. When multiple files are connected, specify fileKey.",
     toolInputSchemas.duplicate_nodes.shape,
@@ -423,7 +436,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "reparent_nodes",
     "Move one or more nodes into a different parent container. When multiple files are connected, specify fileKey.",
     toolInputSchemas.reparent_nodes.shape,
@@ -434,7 +447,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "group_nodes",
     "Wrap a list of nodes in a new group. Nodes must share a common parent (or supply parentId explicitly). Returns the new group's node ID.",
     groupNodesInput.shape,
@@ -443,7 +456,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "ungroup_node",
     "Ungroup a group or frame — its children move up to its parent and the wrapper is removed. Returns the IDs of the orphaned children in their new parent.",
     ungroupNodeInput.shape,
@@ -454,7 +467,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "set_selection",
     "Set the current page selection to a list of node IDs. Pass an empty array to clear the selection. Works in both design editor and Dev Mode.",
     setSelectionInput.shape,
@@ -465,7 +478,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "scroll_and_zoom_into_view",
     "Scroll and zoom the Figma viewport so the given nodes are framed in view. Works in both design editor and Dev Mode.",
     scrollAndZoomIntoViewInput.shape,
@@ -476,7 +489,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "delete_nodes",
     "Delete one or more nodes. This is destructive and requires confirm: true. Page and document nodes cannot be deleted through this tool. When multiple files are connected, specify fileKey.",
     toolInputSchemas.delete_nodes.shape,
@@ -487,7 +500,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "get_motion_styles",
     "List all available animation presets in Figma (Motion API beta). When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_motion_styles.shape,
@@ -496,7 +509,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "get_node_motion",
     "Read a node's current animationStyles, animations, manualKeyframeTracks, and timelines (Motion API beta). When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_node_motion.shape,
@@ -505,7 +518,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "apply_animation_style",
     "Apply a preset animation style to a node (Motion API beta). When multiple files are connected, specify fileKey.",
     toolInputSchemas.apply_animation_style.shape,
@@ -519,7 +532,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "remove_animation_style",
     "Remove an applied animation style from a node (Motion API beta). If no animationStyleId is provided, removes all styles. When multiple files are connected, specify fileKey.",
     toolInputSchemas.remove_animation_style.shape,
@@ -533,7 +546,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "apply_manual_keyframe_track",
     "Applies or replaces the manual Motion keyframe track for a property, paint, or effect field on a node. When multiple files are connected, specify fileKey.",
     toolInputSchemas.apply_manual_keyframe_track.shape,
@@ -547,7 +560,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "remove_manual_keyframe_track",
     "Removes the manual Motion keyframe track for a property, paint, or effect field on a node. When multiple files are connected, specify fileKey.",
     toolInputSchemas.remove_manual_keyframe_track.shape,
@@ -561,7 +574,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "set_timeline_duration",
     "Sets the duration (in seconds) for a timeline. When multiple files are connected, specify fileKey.",
     toolInputSchemas.set_timeline_duration.shape,
@@ -575,7 +588,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     }
   );
 
-  server.tool(
+  addTool(
     "save_screenshots",
     "Export screenshots for multiple nodes and save them directly to the local filesystem. Returns metadata only (no base64). When multiple files are connected, specify fileKey.",
     toolInputSchemas.save_screenshots.shape,
@@ -586,23 +599,23 @@ export function registerTools(server: McpServer, node: Node, port: number): void
           sendWithParams: (requestType, nodeIds, params) =>
             node.sendWithParams(requestType, nodeIds, params, fileKey),
         };
-        const result = await executeSaveScreenshots(sender, items, format, scale, clip);
+        const result = await executeSaveScreenshots(
+          sender,
+          items,
+          format,
+          scale,
+          clip,
+          workspaceRoot
+        );
         return {
           content: [{ type: "text", text: JSON.stringify(result) }],
         };
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: err instanceof Error ? err.message : String(err),
-            },
-          ],
-          isError: true,
-        };
+        return toolError(err);
       }
     }
   );
+  return registry;
 }
 
 /**
@@ -619,7 +632,8 @@ export async function executeSaveScreenshots(
   items: SaveScreenshotItemInput[],
   format?: ExportFormat,
   scale?: number,
-  clip?: boolean
+  clip?: boolean,
+  workspaceRoot = process.cwd()
 ): Promise<{
   total: number;
   succeeded: number;
@@ -634,7 +648,7 @@ export async function executeSaveScreenshots(
       sender,
       item,
       index,
-      process.cwd(),
+      workspaceRoot,
       format,
       scale,
       clip
@@ -663,24 +677,13 @@ async function renderResponse(fn: () => Promise<BridgeResponse>): Promise<ToolRe
   try {
     const resp = await fn();
     if (resp.error) {
-      return {
-        content: [{ type: "text", text: resp.error }],
-        isError: true,
-      };
+      return toolError(new BridgeError(resp.errorCode ?? "OPERATION_FAILED", resp.error));
     }
     return {
       content: [{ type: "text", text: JSON.stringify(resp.data) }],
     };
   } catch (err) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: err instanceof Error ? err.message : String(err),
-        },
-      ],
-      isError: true,
-    };
+    return toolError(err);
   }
 }
 
@@ -705,6 +708,7 @@ function parseToolInput<T>(
     success: false,
     error: {
       content: [{ type: "text", text: result.error.issues[0].message }],
+      error: new BridgeError("INVALID_ARGUMENT", result.error.issues[0].message, 2),
       isError: true,
     },
   };
@@ -722,7 +726,7 @@ function resolveAndValidateOutputPath(outputPath: string, workspaceRoot: string)
   const relativePath = path.relative(resolvedRoot, resolvedPath);
   const escapesRoot = relativePath.startsWith("..") || path.isAbsolute(relativePath);
   if (escapesRoot) {
-    throw new Error(`outputPath must be inside the MCP server working directory: ${resolvedRoot}`);
+    throw new Error(`outputPath must be inside the caller workspace: ${resolvedRoot}`);
   }
   return resolvedPath;
 }
@@ -739,7 +743,7 @@ const MAX_LAYERS_JSON_BYTES = 16 * 1024 * 1024;
  * Reads and parses an html-figma layer-tree JSON file from inside the
  * workspace root. Mirrors the local-path rules of loadImageSourceAsBase64.
  * @param source - JSON file path (absolute or relative to the workspace root).
- * @param workspaceRoot - The MCP server working directory.
+ * @param workspaceRoot - The caller workspace (CLI --workspace or MCP cwd).
  * @returns The parsed layer tree (root LayerNode).
  */
 async function loadLayersJson(
@@ -759,9 +763,7 @@ async function loadLayersJson(
   const relativePath = path.relative(resolvedRoot, resolvedPath);
   const escapesRoot = relativePath.startsWith("..") || path.isAbsolute(relativePath);
   if (escapesRoot) {
-    throw new Error(
-      `layers source must be inside the MCP server working directory: ${resolvedRoot}`
-    );
+    throw new Error(`layers source must be inside the caller workspace: ${resolvedRoot}`);
   }
   // Check the size before reading so an oversized file is rejected without
   // allocating its contents.
@@ -797,22 +799,24 @@ async function loadImageSourceAsBase64(source: string, workspaceRoot: string): P
 
   const dataUrlMatch = source.match(/^data:.*?;base64,(.+)$/);
   if (dataUrlMatch) {
+    if (Buffer.byteLength(dataUrlMatch[1], "base64") > MAX_IMAGE_BYTES)
+      throw new Error(`Image exceeds ${MAX_IMAGE_BYTES} bytes`);
     return dataUrlMatch[1];
   }
 
-  const resolvedRoot = path.resolve(workspaceRoot);
-  const resolvedPath = path.resolve(resolvedRoot, source);
+  const resolvedRoot = await realpath(path.resolve(workspaceRoot));
+  const resolvedPath = await realpath(path.resolve(resolvedRoot, source));
   const relativePath = path.relative(resolvedRoot, resolvedPath);
   const escapesRoot = relativePath.startsWith("..") || path.isAbsolute(relativePath);
   if (escapesRoot) {
-    throw new Error(
-      `image source must be inside the MCP server working directory: ${resolvedRoot}`
-    );
+    throw new Error(`image source must be inside the caller workspace: ${resolvedRoot}`);
   }
-  const bytes = await readFile(resolvedPath);
-  if (bytes.length > MAX_IMAGE_BYTES) {
+  const info = await stat(resolvedPath);
+  if (!info.isFile() || info.size > MAX_IMAGE_BYTES) {
     throw new Error(`Image exceeds ${MAX_IMAGE_BYTES} bytes`);
   }
+  const bytes = await readFile(resolvedPath);
+  if (bytes.length > MAX_IMAGE_BYTES) throw new Error(`Image exceeds ${MAX_IMAGE_BYTES} bytes`);
   return bytes.toString("base64");
 }
 
@@ -1072,6 +1076,7 @@ async function saveScreenshotItemToFile(
 
   try {
     resolvedOutputPath = resolveAndValidateOutputPath(item.outputPath, workspaceRoot);
+    await assertOutputParentsInside(resolvedOutputPath, workspaceRoot);
     const inferredFormat = inferFormatFromPath(resolvedOutputPath);
     const resolvedFormat = resolveExportFormat(item.format ?? defaultFormat, inferredFormat);
     const resolvedScale = resolveScale(item.scale, defaultScale);
@@ -1091,6 +1096,7 @@ async function saveScreenshotItemToFile(
     }
 
     const screenshotExport = getSingleScreenshotExport(resp.data);
+    await assertOutputParentsInside(resolvedOutputPath, workspaceRoot);
     const bytesWritten = await writeBase64ToFile(screenshotExport.base64, resolvedOutputPath);
 
     return {
@@ -1156,4 +1162,105 @@ function resolveScale(itemScale?: number, defaultScale?: number): number | undef
  */
 function isNodeError(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error;
+}
+
+function toolError(error: unknown): ToolResult {
+  const parsed = asBridgeError(error);
+  return { content: [{ type: "text", text: parsed.message }], isError: true, error: parsed };
+}
+
+async function assertOutputParentsInside(outputPath: string, workspaceRoot: string): Promise<void> {
+  const root = await realpath(workspaceRoot);
+  let ancestor = path.dirname(outputPath);
+  while (true) {
+    try {
+      const resolved = await realpath(ancestor);
+      const relative = path.relative(root, resolved);
+      if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+        throw new BridgeError("UNSAFE_PATH", "导出路径通过符号链接或 junction 越出工作目录", 2);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) throw error;
+      ancestor = parent;
+    }
+  }
+}
+
+export async function executeTool(
+  registry: Map<string, ToolDescriptor>,
+  name: string,
+  args: unknown
+): Promise<unknown> {
+  const tool = registry.get(name);
+  if (!tool) throw new BridgeError("UNKNOWN_TOOL", "未知工具: " + name, 2);
+  const parsed = tool.schema.safeParse(args);
+  if (!parsed.success) throw new BridgeError("INVALID_ARGUMENT", parsed.error.message, 2);
+  try {
+    const result = await tool.execute(parsed.data);
+    if (result.isError)
+      throw (
+        result.error ?? new BridgeError("OPERATION_FAILED", result.content[0]?.text ?? "操作失败")
+      );
+    const data = JSON.parse(result.content[0]?.text ?? "null");
+    if (
+      data?.hasErrors ||
+      (name === "import_html_layers" &&
+        typeof data?.layerCount === "number" &&
+        data.layerCount < data.expectedLayerCount)
+    )
+      throw new BridgeError(
+        "PARTIAL_COMPLETION",
+        "部分项目执行失败，请检查 details 后处理失败项",
+        5,
+        data
+      );
+    return data;
+  } catch (error) {
+    const failure = asBridgeError(error);
+    if (tool.mutates && ["TIMEOUT", "CONNECTION_LOST"].includes(failure.code)) {
+      throw new BridgeError(
+        "OUTCOME_UNKNOWN",
+        "操作结果未知；请重新连接并回读目标，勿自动重试。" + failure.message,
+        5
+      );
+    }
+    throw failure;
+  }
+}
+
+export function registerTools(
+  server: McpServer,
+  node: ToolBackend,
+  _port?: number,
+  workspaceRoot = process.cwd()
+): void {
+  const registry = createToolRegistry(node, workspaceRoot);
+  for (const tool of registry.values()) {
+    server.tool(
+      tool.name,
+      tool.description,
+      tool.schema.shape,
+      async (args: Record<string, unknown>) => {
+        try {
+          const data = await executeTool(registry, tool.name, args);
+          return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
+        } catch (error) {
+          const failure = asBridgeError(error);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  error: { code: failure.code, message: failure.message, details: failure.details },
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    );
+  }
 }

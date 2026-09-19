@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Figma 能力研究</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <h1>Figma 浏览器能力研究</h1>
+    <p>实验原型。不会加入正式画布连接，也不宣称替代 Figma 插件。</p>
+    <label>目标标签<select id="tabs"></select></label>
+    <label>研究 WebSocket<input id="endpoint" value="ws://127.0.0.1:1994/research/ws" /></label>
+    <label
+      >research setup 返回的 token<input id="token" type="password" autocomplete="off"
+    /></label>
+    <div>
+      <button id="connect">连接</button><button id="disconnect">断开</button
+      ><button id="status">状态</button>
+    </div>
+    <div><button id="inspect">只读探测</button><button id="cdp">CDP 只读探测</button></div>
+    <label class="check"
+      ><input id="allowSmoke" type="checkbox" />允许在所选测试文件中新建研究 Frame/Text</label
+    >
+    <div>
+      <button id="smoke">创建、修改、导出测试</button
+      ><button id="verify">刷新页面后验证节点</button>
+    </div>
+    <button id="download">下载当前证据 JSON</button>
+    <pre id="result" aria-live="polite">未连接</pre>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>

@@ -175,6 +175,12 @@ binaries/
 
 # Server build output
 server/dist/
+server/plugin/
+server/README.md
+server/LICENSE.md
+server/docs/
+server/research/
+.agents/
 
 # Editor/IDE
 .idea/

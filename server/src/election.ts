@@ -1,4 +1,5 @@
 import type { Node } from "./node.js";
+import { health } from "./runtime.js";
 import { Role } from "./types.js";
 
 /**
@@ -78,13 +79,6 @@ export class Election {
   }
 
   private async pingLeader(): Promise<boolean> {
-    try {
-      const response = await fetch(`${this.leaderUrl}/ping`, {
-        signal: AbortSignal.timeout(2_000),
-      });
-      return response.ok;
-    } catch {
-      return false;
-    }
+    return (await health(this.port)) !== null;
   }
 }
